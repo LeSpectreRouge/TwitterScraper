@@ -24,6 +24,7 @@ public class Scraper {
 
     private final String username;
     private final WebDriver driver;
+    private final Random random = new Random(true);
     private static final By TWEET = By.cssSelector("article[data-testid='tweet']");
     private static final By TIME = By.cssSelector("time");
     private static final By TWEET_TEXT = By.cssSelector("[data-testid='tweetText']");
@@ -81,11 +82,10 @@ public class Scraper {
      * 8 consecutive iterations. Each tweet row contains: id, date, url, text, replies, reposts,
      * likes, bookmarks, and views. The CSV file is flushed after every row.
      *
-     * @return this Scraper instance for method chaining
      * @throws IOException          if the output CSV file cannot be created or written
      * @throws InterruptedException if the thread is interrupted while sleeping between scrolls
      */
-    public final Scraper start() throws IOException, InterruptedException {
+    public final void start() throws IOException, InterruptedException {
         final File file = new File(String.format("%s_tweets.csv", username));
         driver.navigate().to(String.format("https://x.com/%s/with_replies", username));
         final Set<String> tweets = new HashSet<>();
@@ -139,14 +139,14 @@ public class Scraper {
                         writer.newLine();
                         writer.flush();
                         System.out.printf(
-                                "[%d] %s | replies=%s reposts=%s likes=%s bookmarks=%s views=%s%n",
-                                tweets.size(),
-                                content.replace("\n", " "),
-                                replies,
-                                reposts,
-                                likes,
-                                bookmarks,
-                                views
+                            "[%d] %s | replies=%s reposts=%s likes=%s bookmarks=%s views=%s%n",
+                            tweets.size(),
+                            content.replace("\n", " "),
+                            replies,
+                            reposts,
+                            likes,
+                            bookmarks,
+                            views
                         );
                     } catch (WebDriverException ignored) {}
                 }
@@ -155,17 +155,16 @@ public class Scraper {
                 if (!current.isEmpty()) {
                     try {
                         ((JavascriptExecutor)driver).executeScript(
-                                "arguments[0].scrollIntoView({ block: 'end', behavior: 'instant'});",
-                                current.getLast()
+                            "arguments[0].scrollIntoView({ block: 'end', behavior: 'instant'});",
+                            current.getLast()
                         );
                     } catch (StaleElementReferenceException ignored) {}
                 }
-                Thread.sleep(1200);
+                Thread.sleep(random.randomInt(1000, 10_000));
                 System.out.printf("Tweets: %d | unchanged: %d/8%n", tweets.size(), unchanged);
             }
             System.out.printf("Finished: %d tweets saved to %s%n", tweets.size(), file.getName());
         }
-        return this;
     }
 
     /**
