@@ -37,3 +37,6 @@ build/
 
 ### Scraper Results ###
 *.csv
+
+### Netscape Cookies Files ###
+*.cookies
