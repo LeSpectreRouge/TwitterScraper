@@ -27,7 +27,7 @@ mvn clean package
 ### Run
 
 ```bash
-java -jar target/TwitterScraper-1.0.0.jar <username>
+java -jar target/TwitterScraper-1.0.0.jar
 ```
 
 The scraper prompts for a `.cookies` file and can then process the X/Twitter URL provided by the user.
