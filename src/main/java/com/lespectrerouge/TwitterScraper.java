@@ -1,5 +1,9 @@
 package com.lespectrerouge;
 
+import com.github.weisj.darklaf.LafManager;
+import com.github.weisj.darklaf.theme.DarculaTheme;
+import com.github.weisj.darklaf.theme.IntelliJTheme;
+import com.lespectrerouge.frames.MainFrame;
 import com.lespectrerouge.utils.Scraper;
 
 import javax.swing.*;
@@ -12,43 +16,14 @@ import java.util.regex.Pattern;
 public class TwitterScraper {
 
     private static final TwitterScraper INSTANCE = new TwitterScraper();
-    private final Pattern usernamePattern = Pattern.compile("^[A-Za-z0-9_]{4,15}$");
+    private final MainFrame mainFrame = new MainFrame();
 
     public static void main(String... args) { getInstance().run(args); }
 
     private void run(String... args) {
-        if (args.length != 1) {
-            System.err.println(getUsage());
-            return;
-        }
-        final String username = args[0];
-        if (!usernamePattern.matcher(username).matches()) {
-            System.err.printf("Invalid username %s (must match %s)%n", username, usernamePattern.pattern());
-            return;
-        }
-        final File cookiesFile = openCookiesDialog();
-        if (cookiesFile == null || !cookiesFile.isFile()) {
-            JOptionPane.showMessageDialog(null, "Invalid cookies file", "Error", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-        final Scraper scraper = new Scraper(username);
-        try {
-            scraper.loadCookies(cookiesFile);
-            scraper.start();
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException(e);
-        } finally {
-            scraper.quit();
-        }
+        LafManager.install(new DarculaTheme());
+        SwingUtilities.invokeLater(() -> mainFrame.setVisible(true));
     }
-
-    public final File openCookiesDialog() {
-        final JFileChooser chooser = new JFileChooser(new File(System.getProperty("user.home")));
-        chooser.setFileFilter(new FileNameExtensionFilter("Cookie files (*.cookies)", "cookies"));
-        return chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION ? chooser.getSelectedFile() : null;
-    }
-
-    public String getUsage() { return String.format("java -jar %s <username>", getJarFile().getName()); }
 
     public static String getJarName() { return getJarFile().getName(); }
 

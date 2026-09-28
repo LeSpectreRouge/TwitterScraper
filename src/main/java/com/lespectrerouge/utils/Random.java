@@ -31,7 +31,7 @@ public class Random {
      *
      * @param secure whether to use a cryptographically strong random number generator
      */
-    public Random(boolean secure) { this.random = secure ? new SecureRandom() : new java.util.Random(); }
+    public Random(boolean secure) { this.random = (secure ? new SecureRandom() : new java.util.Random()); }
 
     /**
      * Generates a random integer.

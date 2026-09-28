@@ -1,192 +1,193 @@
 package com.lespectrerouge.utils;
 
+import com.lespectrerouge.records.TweetData;
 import org.openqa.selenium.*;
 import org.openqa.selenium.firefox.FirefoxDriver;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * A Selenium-based scraper for extracting tweets from a specified X (formerly Twitter) user's
- * "with_replies" timeline. It loads cookies for authentication, scrolls through the timeline,
- * and writes the collected tweet data to a CSV file.
+ * Scrapes tweet data from an X user profile.
  */
 public class Scraper {
 
     private final String username;
     private final WebDriver driver;
+    private final File csvFile;
     private final Random random = new Random(true);
+    private final AtomicBoolean running = new AtomicBoolean(true);
+
+    private int maxWaitTime = 10_000;
+    private String retryButtonText = "Réessayer";
+
     private static final By TWEET = By.cssSelector("article[data-testid='tweet']");
     private static final By TIME = By.cssSelector("time");
     private static final By TWEET_TEXT = By.cssSelector("[data-testid='tweetText']");
     private static final Pattern STAT_PATTERN = Pattern.compile("([0-9]+(?:[.,][0-9]+)?)(?:\\s*([KMB]))?", Pattern.CASE_INSENSITIVE);
 
     /**
-     * Constructs a new Scraper for the given username and initializes a Firefox driver
-     * pointing to the X home page.
+     * Creates a scraper for the specified username.
      *
-     * @param username the X username whose tweets will be scraped
+     * @param username the username whose tweets should be scraped
      */
     public Scraper(String username) {
-        this.username = username;
+        csvFile = new File(String.format("%s_tweets.csv",(this.username = username)));
         this.driver = new FirefoxDriver();
-        this.driver.get("https://x.com/");
+        driver.get("https://x.com/");
     }
 
     /**
-     * Loads cookies from a Netscape-style cookie file into the current WebDriver session.
-     * Lines that are blank, start with '#', or contain fewer than 7 tab-separated fields
-     * are skipped. Individual cookie loading failures are logged but do not abort the process.
+     * Loads cookies from a tab-separated cookie file.
      *
-     * @param file the cookie file to read
-     * @return this Scraper instance for method chaining
-     * @throws IOException if the file cannot be read
+     * @param file the cookie file to load
+     * @return this scraper
+     * @throws IOException if the cookie file cannot be read
      */
     public final Scraper loadCookies(File file) throws IOException {
         try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isBlank() || line.startsWith("#")) continue;
-                final String[] fields = line.split("\t", -1);
-                if (fields.length < 7) continue;
-                final String domain = (fields[0].startsWith(".") ? fields[0].substring(1) : fields[0]);
-                final String path = fields[2];
-                final boolean secure = fields[3].equalsIgnoreCase("TRUE");
-                final String name = fields[5];
-                final String value = fields[6];
-                final Cookie cookie = new Cookie(name, value, domain, path, null, secure, false );
+                String[] f = line.split("\t", -1);
+                if (f.length < 7) continue;
+                String domain = (f[0].startsWith(".") ? f[0].substring(1) : f[0]);
                 try {
-                    driver.manage().addCookie(cookie);
+                    driver.manage().addCookie(new Cookie(f[5], f[6], domain, f[2], null, f[3].equalsIgnoreCase("TRUE"), false));
                 } catch (Exception e) {
-                    System.err.printf("Unable to load cookie '%s' for '%s': %s%n", name, domain, e.getMessage());
+                    System.err.printf("Unable to load cookie '%s' for '%s': %s%n", f[5], domain, e.getMessage());
                 }
             }
         }
+
         return this;
     }
 
     /**
-     * Navigates to the target user's "with_replies" timeline, scrolls through it, and writes
-     * each newly discovered tweet to a CSV file named "{@code <username>_tweets.csv}".
-     * <p>
-     * The scraping loop stops once the number of collected tweets has remained unchanged for
-     * 8 consecutive iterations. Each tweet row contains: id, date, url, text, replies, reposts,
-     * likes, bookmarks, and views. The CSV file is flushed after every row.
+     * Starts scraping tweets and writes them to the configured CSV file.
      *
-     * @throws IOException          if the output CSV file cannot be created or written
-     * @throws InterruptedException if the thread is interrupted while sleeping between scrolls
+     * @throws IOException if the CSV file cannot be written
+     * @throws InterruptedException if the scraper is interrupted while waiting
      */
     public final void start() throws IOException, InterruptedException {
-        final File file = new File(String.format("%s_tweets.csv", username));
-        driver.navigate().to(String.format("https://x.com/%s/with_replies", username));
+        driver.navigate().to(String.format("https://x.com/%s", username));
         final Set<String> tweets = new HashSet<>();
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-            writer.write("id,date,url,text,replies,reposts,likes,bookmarks,views");
-            writer.newLine();
+        try (CsvWriter csv = new CsvWriter(getCsvFile(), "id,date,url,text,replies,reposts,likes,bookmarks,views")) {
             int unchanged = 0;
-            while (unchanged < 8) {
-                final int previousSize = tweets.size();
-                final List<WebElement> elements = driver.findElements(TWEET);
-                for (int i = 0; i < elements.size(); i++) {
+            while (isRunning()) {
+                if (unchanged > 1 && !clickRetry()) {
+                    driver.navigate().to(String.format("https://x.com/%s/with_replies", username));
+                    unchanged = 0;
+                }
+                int oldSize = tweets.size();
+                for (WebElement tweet : driver.findElements(TWEET)) {
                     try {
-                        final List<WebElement> current = driver.findElements(TWEET);
-                        if (i >= current.size()) break;
-                        final WebElement element = current.get(i);
-                        final List<WebElement> times = element.findElements(TIME);
-                        if (times.isEmpty()) continue;
-                        final WebElement time = times.getFirst();
-                        final String date = time.getAttribute("datetime");
-                        final List<WebElement> links = time.findElements(By.xpath("./ancestor::a[contains(@href, '/status/')]"));
-                        if (links.isEmpty()) continue;
-                        final String url = links.getFirst().getAttribute("href");
-                        final int statusIndex = url.indexOf("/status/");
-                        if (statusIndex == -1) continue;
-                        final String id = url.substring(statusIndex + 8);
-                        if (!tweets.add(id)) continue;
-                        final List<WebElement> text = element.findElements(TWEET_TEXT);
-                        final String content = (text.isEmpty() ? "" : text.getFirst().getText());
-                        final String replies = stat(element, "reply");
-                        final String reposts = stat(element, "retweet");
-                        final String likes = stat(element, "like");
-                        final String bookmarks = stat(element, "bookmark");
-                        final String views = stat(element, "view");
-                        writer.write(csv(id));
-                        writer.write(",");
-                        writer.write(csv(date));
-                        writer.write(",");
-                        writer.write(csv(url));
-                        writer.write(",");
-                        writer.write(csv(content));
-                        writer.write(",");
-                        writer.write(csv(replies));
-                        writer.write(",");
-                        writer.write(csv(reposts));
-                        writer.write(",");
-                        writer.write(csv(likes));
-                        writer.write(",");
-                        writer.write(csv(bookmarks));
-                        writer.write(",");
-                        writer.write(csv(views));
-                        writer.newLine();
-                        writer.flush();
+                        final TweetData data = data(tweet);
+                        if (data == null || !tweets.add(data.id())) continue;
+                        csv.write(
+                            data.id(),
+                            data.date(),
+                            data.url(),
+                            data.text(),
+                            data.replies(),
+                            data.reposts(),
+                            data.likes(),
+                            data.bookmarks(),
+                            data.views()
+                        );
                         System.out.printf(
                             "[%d] %s | replies=%s reposts=%s likes=%s bookmarks=%s views=%s%n",
                             tweets.size(),
-                            content.replace("\n", " "),
-                            replies,
-                            reposts,
-                            likes,
-                            bookmarks,
-                            views
+                            data.text().replace("\n", " "),
+                            data.replies(),
+                            data.reposts(),
+                            data.likes(),
+                            data.bookmarks(),
+                            data.views()
                         );
+
                     } catch (WebDriverException ignored) {}
                 }
-                if (tweets.size() == previousSize) unchanged++; else unchanged = 0;
-                final List<WebElement> current = driver.findElements(TWEET);
-                if (!current.isEmpty()) {
-                    try {
-                        ((JavascriptExecutor)driver).executeScript(
-                            "arguments[0].scrollIntoView({ block: 'end', behavior: 'instant'});",
-                            current.getLast()
-                        );
-                    } catch (StaleElementReferenceException ignored) {}
-                }
-                Thread.sleep(random.randomInt(1000, 10_000));
-                System.out.printf("Tweets: %d | unchanged: %d/8%n", tweets.size(), unchanged);
+                unchanged = (tweets.size() == oldSize ? unchanged + 1 : 0);
+                scroll();
+                waitForTweets(maxWaitTime);
+                System.out.printf("Tweets: %d | unchanged: %d%n", tweets.size(), unchanged);
             }
-            System.out.printf("Finished: %d tweets saved to %s%n", tweets.size(), file.getName());
+            System.out.printf("Finished: %d tweets saved to %s%n", tweets.size(), getCsvFile().getName());
         }
     }
 
     /**
-     * Extracts a single statistic (e.g. replies, reposts, likes, bookmarks, views) from a tweet
-     * element by reading the {@code aria-label} attribute of the matching child element and
-     * parsing the leading numeric value (with optional K/M/B suffix).
+     * Extracts tweet data from a tweet element.
      *
-     * @param tweet the tweet WebElement to inspect
-     * @param type  the statistic type keyword used in the {@code data-testid} selector
-     *              (e.g. "reply", "retweet", "like", "bookmark", "view")
-     * @return the parsed statistic as a string (e.g. "1.2K"), or "0" if none is found
+     * @param tweet the tweet element
+     * @return the extracted tweet data, or {@code null} if required data is missing
+     */
+    private TweetData data(WebElement tweet) {
+        final List<WebElement> times = tweet.findElements(TIME);
+        if (times.isEmpty()) return null;
+        final WebElement time = times.getFirst();
+        final String date = time.getAttribute("datetime");
+        final List<WebElement> links = time.findElements(By.xpath("./ancestor::a[contains(@href, '/status/')]"));
+        if (links.isEmpty()) return null;
+        final String url = links.getFirst().getAttribute("href");
+        final String id = id(url);
+        if (id.isBlank()) return null;
+        final List<WebElement> text = tweet.findElements(TWEET_TEXT);
+        return new TweetData(
+            id,
+            date,
+            url,
+            text.isEmpty() ? "" : text.getFirst().getText(),
+            stat(tweet, "reply"),
+            stat(tweet, "retweet"),
+            stat(tweet, "like"),
+            stat(tweet, "bookmark"),
+            stat(tweet, "view")
+        );
+    }
+
+    /**
+     * Extracts the tweet ID from a tweet URL.
+     *
+     * @param url the tweet URL
+     * @return the tweet ID, or an empty string if no ID is found
+     */
+    private String id(String url) {
+        if (url == null) return "";
+        int index = url.indexOf("/status/");
+        if (index == -1) return "";
+        String id = url.substring(index + 8);
+        int end = id.indexOf('?');
+        if (end == -1) end = id.indexOf('/');
+        return end == -1 ? id : id.substring(0, end);
+    }
+
+    /**
+     * Extracts a statistic from a tweet element.
+     *
+     * @param tweet the tweet element
+     * @param type the statistic type
+     * @return the statistic value, or {@code "0"} if it is unavailable
      */
     private String stat(WebElement tweet, String type) {
-        final List<WebElement> elements = tweet.findElements(By.cssSelector("[data-testid*='" + type + "']"));
-        for (WebElement element : elements) {
+        for (WebElement element : tweet.findElements(By.cssSelector(String.format("[data-testid*='%s']", type)))) {
             try {
-                final String label = element.getAttribute("aria-label");
+                String label = element.getAttribute("aria-label");
                 if (label == null || label.isBlank()) continue;
-                final Matcher matcher = STAT_PATTERN.matcher(label);
+                Matcher matcher = STAT_PATTERN.matcher(label);
                 if (!matcher.find()) continue;
-                final String number = matcher.group(1);
-                final String suffix = matcher.group(2);
+                String number = matcher.group(1);
+                String suffix = matcher.group(2);
                 return (suffix == null ? number : number + suffix.toUpperCase());
             } catch (StaleElementReferenceException ignored) {}
         }
@@ -194,22 +195,51 @@ public class Scraper {
     }
 
     /**
-     * Escapes a value for safe inclusion in a CSV field by wrapping it in double quotes and
-     * doubling any internal double quotes. Newlines and carriage returns are replaced with
-     * spaces. A {@code null} value is written as an empty quoted field.
+     * Clicks the retry button when it is available.
      *
-     * @param value the raw value to escape
-     * @return the CSV-escaped representation of the value
+     * @return {@code true} if the button was clicked; otherwise {@code false}
      */
-    private String csv(String value) {
-        if (value == null) return "\"\"";
-        return ("\"" + value.replace("\"", "\"\"").replace("\r", "").replace("\n", " ") + "\"");
+    protected final boolean clickRetry() {
+        try {
+            for (WebElement button : driver.findElements(By.xpath(String.format("//button[.//span[normalize-space()='%s']]", retryButtonText)))) {
+                try {
+                    if (!button.isDisplayed() || !button.isEnabled()) continue;
+                    try {
+                        button.click();
+                    } catch (ElementClickInterceptedException e) {
+                        ((JavascriptExecutor)driver).executeScript("arguments[0].click();", button);
+                    }
+                    System.out.println("Retry button clicked.");
+                    return true;
+                } catch (StaleElementReferenceException ignored) {}
+            }
+        } catch (WebDriverException ignored) {}
+        return false;
     }
 
     /**
-     * Quits the underlying WebDriver, closing the browser and ending the session.
+     * Scrolls to the last visible tweet.
+     */
+    protected final void scroll() {
+        final List<WebElement> tweets = driver.findElements(TWEET);
+        if (tweets.isEmpty()) return;
+        try {
+            ((JavascriptExecutor)driver).executeScript("arguments[0].scrollIntoView({block:'end',behavior:'instant'});", tweets.getLast());
+        } catch (StaleElementReferenceException ignored) {}
+    }
+
+    /**
+     * Waits for additional tweets to load.
      *
-     * @return this Scraper instance for method chaining
+     * @param maxTime the maximum wait time in milliseconds
+     * @throws InterruptedException if the thread is interrupted while waiting
+     */
+    protected final void waitForTweets(int maxTime) throws InterruptedException { Thread.sleep(random.randomInt(1000, maxTime)); }
+
+    /**
+     * Quits the WebDriver.
+     *
+     * @return this scraper
      */
     public final Scraper quit() {
         driver.quit();
@@ -217,17 +247,88 @@ public class Scraper {
     }
 
     /**
-     * Returns the underlying WebDriver instance.
+     * Returns whether scraping is currently running.
      *
-     * @return the WebDriver used by this scraper
+     * @return {@code true} if scraping is active
+     */
+    public final boolean isRunning() { return running.get(); }
+
+    /**
+     * Sets whether scraping should continue.
+     *
+     * @param running whether scraping should be active
+     * @return this scraper
+     */
+    public final Scraper setRunning(boolean running) {
+        this.running.set(running);
+        return this;
+    }
+
+    /**
+     * Toggles the running state.
+     *
+     * @return this scraper
+     */
+    public final Scraper toggle() { return setRunning(!running.get()); }
+
+    /**
+     * Returns the WebDriver used by this scraper.
+     *
+     * @return the WebDriver
      */
     public final WebDriver getDriver() { return driver; }
 
     /**
-     * Returns the username associated with this scraper.
+     * Returns the CSV output file.
      *
-     * @return the target X username
+     * @return the CSV file
+     */
+    public final File getCsvFile() { return csvFile; }
+
+    /**
+     * Returns the scraped username.
+     *
+     * @return the username
      */
     public final String getUsername() { return username; }
+
+    /**
+     * Returns the maximum wait time between scrolls.
+     *
+     * @return the maximum wait time in milliseconds
+     */
+    public final int getMaxWaitTime() { return maxWaitTime; }
+
+    /**
+     * Sets the maximum wait time between scrolls.
+     *
+     * @param maxWaitTime the maximum wait time in milliseconds
+     * @return this scraper
+     * @throws IllegalArgumentException if the wait time is less than 1001 milliseconds
+     */
+    public final Scraper setMaxWaitTime(int maxWaitTime) {
+        if (maxWaitTime < 1001)
+            throw new IllegalArgumentException("maxWaitTime cannot be lower than 1001");
+        this.maxWaitTime = maxWaitTime;
+        return this;
+    }
+
+    /**
+     * Returns the text used to identify the retry button.
+     *
+     * @return the retry button text
+     */
+    public final String getRetryButtonText() { return retryButtonText; }
+
+    /**
+     * Sets the text used to identify the retry button.
+     *
+     * @param retryButtonText the retry button text
+     * @return this scraper
+     */
+    public final Scraper setRetryButtonText(String retryButtonText) {
+        this.retryButtonText = retryButtonText;
+        return this;
+    }
 
 }
